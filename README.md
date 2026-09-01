@@ -12,6 +12,17 @@
 
 ---
 
+## 0. 이어서 작업하려면
+
+| 문서 | 용도 |
+|---|---|
+| [`CLAUDE.md`](CLAUDE.md) | 설계 의도 · 파일별 책임 · **실제로 겪은 함정 목록** · 코드 컨벤션. Claude Code 가 자동으로 읽는다 |
+| [`HANDOFF.md`](HANDOFF.md) | 현재 상태 · 검증된 것과 **검증되지 않은 것** · 다음 할 일 · 사내 DB 연결 순서 |
+
+새 환경에서는 `HANDOFF.md` 부터 읽는다.
+
+---
+
 ## 1. 빠른 시작 (로컬)
 
 ```bash
@@ -80,6 +91,8 @@ python scripts/smoke_test.py
 ## 3. 프로젝트 구조
 
 ```
+CLAUDE.md               Claude Code 작업 지침 (설계 의도 · 함정 목록 · 컨벤션)
+HANDOFF.md              인수인계 (현재 상태 · 미검증 항목 · 다음 할 일)
 app.py                  Streamlit UI 조립 + 세션 상태 (비즈니스 로직 없음)
 requirements.txt        의존성 6개 (배포 실패 지점을 줄이기 위해 최소화)
 .streamlit/
@@ -97,7 +110,7 @@ src/
   prompts.py            ③ 프롬프트 조립 (캐시 프리픽스 분리)
   llm.py                LLM 호출 래퍼 (OpenAI/Anthropic 추상화) · 토큰·비용 계측 · 오류 한글화
   guardrails.py         ④ sqlglot 기반 정적 검증 (DDL/DML 차단, LIMIT 주입 등)
-  pipeline.py           ①~⑥ 오케스트레이션 + 실행 추적(Step) 기록
+  pipeline.py           ①~⑦ 오케스트레이션 + 실행 추적(Step) 기록
   evaluation.py         골든셋 12문항 · Execution Accuracy 채점기
 ```
 
