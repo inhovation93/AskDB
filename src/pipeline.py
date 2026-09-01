@@ -25,7 +25,8 @@ from .db import QueryTimeout, Schema, render_schema, run_query
 
 @dataclass
 class Options:
-    model: str = llm.DEFAULT_MODEL
+    provider: str = llm.OPENAI
+    model: str = llm.DEFAULT_MODELS[llm.OPENAI]
     effort: str = "medium"
     use_schema_linking: bool = True
     use_fewshot: bool = True
@@ -118,8 +119,9 @@ def run(question: str, *, client, schema: Schema, options: Options,
 
         t = time.time()
         try:
-            out = llm.complete(client, model=options.model, system=system,
-                               messages=messages, effort=options.effort)
+            out = llm.complete(client, options.provider, model=options.model,
+                               system=system, messages=messages,
+                               effort=options.effort)
         except llm.LLMError as exc:
             res.steps.append(Step(label, "error", str(exc), time.time() - t))
             res.error = str(exc)
@@ -230,13 +232,13 @@ def _to_markdown(df: pd.DataFrame) -> str:
     return "\n".join([head, sep, *body])
 
 
-def summarize(client, *, question: str, sql: str, df: pd.DataFrame,
+def summarize(client, provider: str, *, question: str, sql: str, df: pd.DataFrame,
               model: str, max_table_rows: int = 30):
     """실행 결과를 자연어로 요약 — 제너레이터(스트리밍)."""
     shown = df.head(max_table_rows)
     table_md = _to_markdown(shown) if not shown.empty else "(결과 0행)"
     prompt = prompts.build_answer_prompt(question, sql, table_md, len(df),
                                          truncated=len(df) > max_table_rows)
-    return llm.stream_text(client, model=model, system=prompts.ANSWER_SYSTEM,
+    return llm.stream_text(client, provider, model=model, system=prompts.ANSWER_SYSTEM,
                            messages=[{"role": "user", "content": prompt}],
                            max_tokens=1200, effort="low")

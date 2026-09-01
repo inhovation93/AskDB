@@ -83,9 +83,12 @@ def check_offline(schema) -> bool:
     return ok
 
 
-def check_online(schema, api_key: str, full: bool, model: str) -> bool:
-    client = llm.make_client(api_key)
-    options = pipeline.Options(model=model, effort="medium", max_retries=2)
+def check_online(schema, api_key: str, full: bool, model: str | None) -> bool:
+    client, provider = llm.make_client(api_key)
+    model = model or llm.DEFAULT_MODELS[provider]
+    print(f"\n■ 공급자: {llm.provider_label(provider)} · 모델: {model}")
+    options = pipeline.Options(provider=provider, model=model,
+                               effort="medium", max_retries=2)
     ok = True
 
     if full:
@@ -112,8 +115,10 @@ def check_online(schema, api_key: str, full: bool, model: str) -> bool:
         for r in report.rows:
             if r.usage:
                 total.add(r.usage)
-        print(f"  ▶ 토큰 입력 {total.input_tokens:,} / 캐시적중 {total.cache_read:,} / "
-              f"출력 {total.output_tokens:,} · 비용 ${total.cost_usd(model):.4f}")
+        cost = total.cost_usd(model)
+        print(f"  ▶ 토큰 입력 {total.total_input:,} / 캐시적중 {total.cache_read:,} / "
+              f"출력 {total.output_tokens:,}"
+              + (f" · 비용 ${cost:.4f}" if cost is not None else " · 비용 단가 미등록"))
         ok = report.accuracy >= 0.6
     else:
         print(f"\n■ 대표 질문 파이프라인 점검 (모델 {model})")
@@ -133,17 +138,18 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--full", action="store_true", help="골든셋 전체 평가 실행")
     ap.add_argument("--offline", action="store_true", help="LLM 호출 없이 점검")
-    ap.add_argument("--model", default=llm.DEFAULT_MODEL)
+    ap.add_argument("--model", default=None, help="예: gpt-5, claude-opus-5")
     args = ap.parse_args()
 
     schema = load_schema()
     ok = check_offline(schema)
 
     if not args.offline:
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        api_key = (os.environ.get("OPENAI_API_KEY", "")
+                   or os.environ.get("ANTHROPIC_API_KEY", "")).strip()
         if not api_key:
-            print("\n⚠ ANTHROPIC_API_KEY 가 없어 LLM 구간을 건너뜁니다. "
-                  "(--offline 로 이 경고를 숨길 수 있습니다)")
+            print("\n⚠ OPENAI_API_KEY / ANTHROPIC_API_KEY 가 없어 LLM 구간을 "
+                  "건너뜁니다. (--offline 로 이 경고를 숨길 수 있습니다)")
         else:
             ok = check_online(schema, api_key, args.full, args.model) and ok
 

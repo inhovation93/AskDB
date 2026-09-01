@@ -1,4 +1,5 @@
 streamlit>=1.49,<2
+openai>=1.60
 anthropic>=0.69.0
 pandas>=2.2.0
 sqlglot>=25.24.0

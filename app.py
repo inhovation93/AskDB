@@ -74,20 +74,29 @@ def load_schema():
         conn.close()
 
 
+KEY_NAMES = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY")
+
+
 def resolve_api_key() -> tuple[str | None, str]:
-    """키 출처를 함께 반환한다. 우선순위: 세션 입력 > Secrets > 환경변수."""
+    """키와 그 출처를 반환한다. 우선순위: 세션 입력 > Secrets > 환경변수.
+
+    OpenAI / Anthropic 키를 모두 받아들이며, 공급자는 키 접두어로 자동 판별한다.
+    Secrets 에 어느 쪽을 넣어도 앱이 동작하므로 배포 실패 지점이 줄어든다.
+    """
     if st.session_state.get("user_api_key"):
-        return st.session_state["user_api_key"], "사용자 입력"
-    try:
-        if "ANTHROPIC_API_KEY" in st.secrets:
-            key = str(st.secrets["ANTHROPIC_API_KEY"]).strip()
-            if key:
-                return key, "배포 Secrets"
-    except Exception:
-        pass
-    env = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    if env:
-        return env, "환경변수"
+        return st.session_state["user_api_key"].strip(), "사용자 입력"
+    for name in KEY_NAMES:
+        try:
+            if name in st.secrets:
+                key = str(st.secrets[name]).strip()
+                if key:
+                    return key, f"배포 Secrets ({name})"
+        except Exception:
+            pass
+    for name in KEY_NAMES:
+        env = os.environ.get(name, "").strip()
+        if env:
+            return env, f"환경변수 ({name})"
     return None, "없음"
 
 
@@ -100,11 +109,13 @@ def init_state() -> None:
     ss.setdefault("eval_report", None)
     ss.setdefault("pending_question", None)
     ss.setdefault("user_api_key", "")
+    ss.setdefault("model_list", [])
 
 
 init_state()
 schema = load_schema()
 api_key, key_source = resolve_api_key()
+provider = llm.detect_provider(api_key) if api_key else llm.OPENAI
 ROW_TOTAL = sum(t.row_count for t in schema.tables.values())
 
 
@@ -115,22 +126,40 @@ with st.sidebar:
     st.markdown("### ⚙️ 실행 설정")
 
     if api_key:
-        st.success(f"API 키 연결됨 · 출처: {key_source}", icon="🔑")
+        st.success(f"**{llm.provider_label(provider)}** 연결됨\n\n출처: {key_source}",
+                   icon="🔑")
     else:
         st.warning("API 키가 없어 **오프라인 데모 모드**로 동작합니다.", icon="🔌")
-        st.caption("아래에 본인 키를 넣으면 실제 SQL 생성이 활성화됩니다. "
-                   "입력한 키는 이 브라우저 세션에만 보관되며 저장·전송되지 않습니다.")
-        st.text_input("Anthropic API 키", type="password", key="user_api_key",
-                      placeholder="sk-ant-...")
+        st.caption("OpenAI 또는 Anthropic 키를 넣으면 실제 SQL 생성이 활성화됩니다. "
+                   "공급자는 키 형식으로 자동 판별하며, 입력한 키는 이 브라우저 "
+                   "세션에만 보관되고 저장·전송되지 않습니다.")
+        st.text_input("API 키", type="password", key="user_api_key",
+                      placeholder="sk-... (OpenAI) 또는 sk-ant-... (Anthropic)")
 
-    model = st.selectbox(
-        "모델", list(llm.MODELS),
-        format_func=lambda m: llm.MODELS[m]["label"],
-        help="Opus 5 는 복잡한 조인·윈도우 함수에서 정확도가 높고, Sonnet 5 는 더 빠르고 저렴합니다.",
+    suggestions = llm.MODEL_SUGGESTIONS[provider]
+    picked = st.selectbox(
+        "모델", suggestions + ["직접 입력…"],
+        help="계정에서 쓸 수 없는 모델이면 아래 '사용 가능한 모델 확인'으로 실제 목록을 조회하세요.",
     )
+    if picked == "직접 입력…":
+        model = st.text_input("모델 ID", value=llm.DEFAULT_MODELS[provider]).strip()
+    else:
+        model = picked
+
+    if st.button("사용 가능한 모델 확인", width="stretch", disabled=not api_key):
+        try:
+            client_probe, prov_probe = llm.make_client(api_key)
+            st.session_state["model_list"] = llm.list_models(client_probe, prov_probe)
+        except llm.LLMError as exc:
+            st.session_state["model_list"] = []
+            st.error(str(exc))
+    if st.session_state.get("model_list"):
+        st.caption("이 계정에서 사용 가능한 모델 (위 '직접 입력…'에 붙여넣으세요)")
+        st.code("\n".join(st.session_state["model_list"]), language="text")
+
     effort = st.select_slider(
         "추론 깊이 (effort)", options=["low", "medium", "high"], value="medium",
-        help="깊을수록 정확하지만 느립니다. 복잡한 질문일 때 high 를 쓰세요.",
+        help="깊을수록 정확하지만 느립니다. 추론 모델이 아니면 자동으로 무시됩니다.",
     )
 
     with st.expander("고급 파이프라인 옵션", expanded=False):
@@ -148,13 +177,19 @@ with st.sidebar:
     st.markdown("### 📊 이번 세션 사용량")
     u: llm.Usage = st.session_state["total_usage"]
     c1, c2 = st.columns(2)
+    cost = u.cost_usd(model)
     c1.metric("API 호출", f"{u.calls}회")
-    c2.metric("비용(추정)", f"${u.cost_usd(model):.4f}")
-    c1.metric("입력 토큰", f"{u.input_tokens + u.cache_read + u.cache_write:,}")
+    c2.metric("비용(추정)", f"${cost:.4f}" if cost is not None else "—")
+    c1.metric("입력 토큰", f"{u.total_input:,}")
     c2.metric("출력 토큰", f"{u.output_tokens:,}")
+    if cost is None and u.calls:
+        st.caption("이 모델의 단가가 등록되지 않아 비용 추정을 생략합니다(토큰 수는 정확).")
     if u.cache_read:
-        saved = u.cache_read * llm.MODELS[model]["in"] * 0.9 / 1_000_000
-        st.caption(f"💾 프롬프트 캐시 적중 {u.cache_read:,} 토큰 → 약 ${saved:.4f} 절감")
+        unit = llm.PRICING.get(model)
+        extra = ""
+        if unit:
+            extra = f" → 약 ${u.cache_read * unit['in'] * 0.9 / 1_000_000:.4f} 절감"
+        st.caption(f"💾 프롬프트 캐시 적중 {u.cache_read:,} 토큰{extra}")
 
     st.divider()
     st.markdown("### 🗄️ 연결된 데이터")
@@ -170,7 +205,7 @@ with st.sidebar:
         st.rerun()
 
 options = pipeline.Options(
-    model=model, effort=effort, use_schema_linking=use_linking,
+    provider=provider, model=model, effort=effort, use_schema_linking=use_linking,
     use_fewshot=use_fewshot, max_retries=max_retries,
     row_limit=row_limit, max_tables=max_tables,
 )
@@ -185,7 +220,7 @@ st.markdown(f"""
   <p>데이터팀에 요청하지 않고, 한국어 질문 한 줄로 사내 DB 를 조회합니다.
      스키마 링킹 → 검증된 예제 검색 → SQL 생성 → 정적 검증·가드레일 → 읽기전용 실행 →
      실패 시 자기수정까지, 전 과정을 눈으로 확인할 수 있는 파이프라인입니다.</p>
-  <span class="pill">Claude Opus 5 / Sonnet 5</span>
+  <span class="pill">OpenAI · Anthropic 양쪽 지원</span>
   <span class="pill">스키마 링킹</span>
   <span class="pill">세만틱 레이어</span>
   <span class="pill">SQL 가드레일</span>
@@ -374,7 +409,7 @@ with tab_ask:
         with st.chat_message("user"):
             st.markdown(question)
         with st.chat_message("assistant", avatar="🔎"):
-            client = llm.make_client(api_key)
+            client, _prov = llm.make_client(api_key, provider)
             with st.status("파이프라인 실행 중…", expanded=True) as status:
                 st.write("① 관련 테이블을 찾고 ② 유사 예제를 검색합니다…")
                 res = pipeline.run(question, client=client, schema=schema,
@@ -394,8 +429,8 @@ with tab_ask:
             answer = ""
             if res.ok:
                 try:
-                    stream = pipeline.summarize(client, question=question, sql=res.sql,
-                                                df=res.df, model=model)
+                    stream = pipeline.summarize(client, provider, question=question,
+                                                sql=res.sql, df=res.df, model=model)
                     holder = st.empty()
                     for chunk in stream:
                         if isinstance(chunk, llm.Usage):
@@ -478,7 +513,7 @@ with tab_eval:
 
     if st.button("▶️ 평가 실행", type="primary", disabled=not api_key,
                  help=None if api_key else "API 키가 필요합니다"):
-        client = llm.make_client(api_key)
+        client, _prov = llm.make_client(api_key, provider)
         report = evaluation.EvalReport()
         bar = st.progress(0.0, text="평가 준비 중…")
         live = st.empty()
@@ -505,7 +540,7 @@ with tab_eval:
                   delta=f"{sum(r.correct for r in report.rows)}/{len(report.rows)} 정답")
         r2.metric("평균 응답시간", f"{report.avg_elapsed:.1f}초")
         r3.metric("자기수정 발생", f"{report.self_corrected}건")
-        r4.metric("모델", llm.MODELS[options.model]["label"].split(" (")[0])
+        r4.metric("모델", options.model)
 
         st.markdown("**난이도별 정확도**")
         diff = report.by_difficulty()
@@ -561,7 +596,7 @@ AskDB 는 이 병목을 없애는 것을 목표로 한다. 단, 사내 DB 에 LL
 |---|---|---|
 | ① 스키마 링킹 | 질문과 관련된 테이블만 선별 (동의어 사전 + 코멘트 유사도 + 실제 값 매칭 + FK 연결성) | 테이블 수천 개인 실제 DW 에서 전체 스키마 주입은 불가능. 토큰·정확도 모두 악화 |
 | ② 유사 예제 검색 | 검증된 (질문, SQL) 쌍 중 유사한 것 4개를 프롬프트에 주입 | 회사 고유의 조인 패턴·지표 정의를 예시로 학습시킴. 👍 피드백이 뱅크에 축적됨 |
-| ③ SQL 생성 | Claude 가 `<reasoning>/<sql>/<assumption>` 형식으로 생성 | 판단 근거와 해석 가정을 분리해 사람이 검토 가능하게 만듦 |
+| ③ SQL 생성 | LLM 이 `<reasoning>/<sql>/<assumption>` 형식으로 생성 | 판단 근거와 해석 가정을 분리해 사람이 검토 가능하게 만듦 |
 | ④ 정적 검증·가드레일 | sqlglot 파싱 → 단일 SELECT 강제, DDL/DML 차단, 없는 테이블 차단, 민감 컬럼 차단, LIMIT 주입 | 실행 **전에** 위험과 환각을 걸러냄 |
 | ⑤ 읽기전용 실행 | `mode=ro` 커넥션 + 쿼리 타임아웃 | 드라이버 수준 2차 방어. 폭주 쿼리로 DB 를 물지 않게 함 |
 | ⑥ 자기수정 | 오류 메시지를 모델에 되먹여 재생성 (기본 2회) | 실무 질문의 상당수는 1회차에 사소한 컬럼·문법 오류가 남 |
@@ -582,14 +617,15 @@ AskDB 는 이 병목을 없애는 것을 목표로 한다. 단, 사내 DB 에 LL
 - **민감 컬럼 마스킹 훅**: `guardrails.BLOCKED_COLUMNS` (데모에서는 `employees.annual_salary` 차단)
 - **비용·자원 상한**: 결과 행 제한, 쿼리 타임아웃, 자기수정 횟수 상한
 - **키 관리**: API 키는 Streamlit Secrets 로만 주입하며 코드·화면에 노출되지 않는다
+- **공급자 교체 가능**: `src/llm.py` 한 파일만 바꾸면 다른 LLM 으로 갈아끼울 수 있다
 - **데이터**: 전부 seed 고정 난수로 만든 가상 데이터. 개인정보·기밀 없음
 
 #### 사용된 핵심 기술
 
 | 영역 | 사용 기술 |
 |---|---|
-| LLM | Anthropic **Claude Opus 5 / Sonnet 5** (Messages API, adaptive thinking, `effort` 조절) |
-| 비용 최적화 | **프롬프트 캐싱** — 규칙·세만틱 레이어를 캐시 프리픽스로 고정 (사이드바에서 절감액 확인) |
+| LLM | **OpenAI GPT** (Chat Completions) / **Anthropic Claude** (Messages API) — 키 접두어로 자동 판별 |
+| 비용 최적화 | **프롬프트 캐싱** — 안정적인 규칙·세만틱 레이어를 프롬프트 앞쪽에 고정 배치 (OpenAI 자동 캐싱 / Anthropic `cache_control`) |
 | SQL 안전성 | **sqlglot** AST 파싱·검증·LIMIT 주입 |
 | 데이터 | **SQLite** 읽기 전용 커넥션, 9테이블 합성 데이터셋 |
 | UI | **Streamlit** (chat, status, tabs) + **Plotly** 자동 시각화 |

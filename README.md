@@ -5,7 +5,7 @@
 정확도 장치와 안전 장치를 파이프라인으로 명시화**한 것이 이 프로젝트의 핵심입니다.
 
 ```
-질문 ─▶ ① 스키마 링킹 ─▶ ② 유사 예제 검색 ─▶ ③ SQL 생성(Claude)
+질문 ─▶ ① 스키마 링킹 ─▶ ② 유사 예제 검색 ─▶ ③ SQL 생성(LLM)
         ─▶ ④ 정적 검증·가드레일 ─▶ ⑤ 읽기전용 실행 ─▶ ⑥ 실패 시 자기수정 ─▶ 답변 + 차트
 ```
 
@@ -20,9 +20,11 @@ pip install -r requirements.txt
 API 키를 환경변수로 넣고 실행합니다.
 
 ```bash
-export ANTHROPIC_API_KEY="sk-ant-..."   # Windows PowerShell: $env:ANTHROPIC_API_KEY="sk-ant-..."
+export OPENAI_API_KEY="sk-..."   # Windows PowerShell: $env:OPENAI_API_KEY="sk-..."
 streamlit run app.py
 ```
+
+`ANTHROPIC_API_KEY` 를 넣으면 Claude 로 동작합니다. 공급자는 키 접두어로 자동 판별됩니다.
 
 키 없이 실행해도 앱은 **오프라인 데모 모드**로 정상 동작합니다
 (DB·가드레일·검증된 SQL 실행은 확인 가능, 자연어 → SQL 생성만 비활성).
@@ -59,13 +61,15 @@ python scripts/smoke_test.py
    앱 화면 우측 상단 **⋮ → Settings → Secrets** 에 아래 한 줄을 붙여넣고 Save:
 
    ```toml
-   ANTHROPIC_API_KEY = "sk-ant-실제키"
+   OPENAI_API_KEY = "sk-실제키"
    ```
+
+   (Claude 를 쓰려면 `ANTHROPIC_API_KEY` 로 넣으면 됩니다. 둘 중 하나만 있으면 됩니다.)
 
    저장하면 앱이 자동 재시작됩니다.
 
 4. **제3자 접속 검증** — 시크릿 창(또는 휴대폰)으로 배포 URL 을 열고 확인:
-   - [ ] 사이드바에 `API 키 연결됨 · 출처: 배포 Secrets` 가 보인다
+   - [ ] 사이드바에 `OpenAI 연결됨 · 출처: 배포 Secrets (OPENAI_API_KEY)` 가 보인다
    - [ ] 예시 질문 버튼을 눌러 SQL 생성 → 결과 표·차트가 나온다
    - [ ] '자동 평가' 탭에서 `앞 6문항` 평가가 끝까지 돌아간다
    - [ ] 화면 어디에도 API 키가 노출되지 않는다
@@ -76,7 +80,7 @@ python scripts/smoke_test.py
 
 ```
 app.py                  Streamlit UI 조립 + 세션 상태 (비즈니스 로직 없음)
-requirements.txt        의존성 5개 (배포 실패 지점을 줄이기 위해 최소화)
+requirements.txt        의존성 6개 (배포 실패 지점을 줄이기 위해 최소화)
 .streamlit/
   config.toml           테마
   secrets.toml.example  Secrets 형식 예시 (실제 키 없음)
@@ -88,7 +92,7 @@ src/
   schema_linker.py      ① 질문 → 관련 테이블 선별 (동의어·코멘트·값·FK 연결성)
   knowledge.py          ② 세만틱 레이어(지표 정의) + Few-shot 뱅크 + 유사도 검색
   prompts.py            ③ 프롬프트 조립 (캐시 프리픽스 분리)
-  llm.py                Claude 호출 래퍼 · 토큰/비용 계측 · 오류 한글화 · 태그 파싱
+  llm.py                LLM 호출 래퍼 (OpenAI/Anthropic 추상화) · 토큰·비용 계측 · 오류 한글화
   guardrails.py         ④ sqlglot 기반 정적 검증 (DDL/DML 차단, LIMIT 주입 등)
   pipeline.py           ①~⑥ 오케스트레이션 + 실행 추적(Step) 기록
   evaluation.py         골든셋 12문항 · Execution Accuracy 채점기
@@ -130,8 +134,8 @@ src/
 
 | 영역 | 기술 |
 |---|---|
-| LLM | Anthropic **Claude Opus 5 / Sonnet 5** — Messages API, adaptive thinking, `output_config.effort` |
-| 비용 최적화 | **프롬프트 캐싱** (`cache_control: ephemeral`) — 규칙·세만틱 레이어를 캐시 프리픽스로 고정 |
+| LLM | **OpenAI GPT** (Chat Completions, `reasoning_effort`) 또는 **Anthropic Claude** (Messages API) — `src/llm.py` 가 키 접두어로 자동 판별 |
+| 비용 최적화 | **프롬프트 캐싱** — 규칙·세만틱 레이어를 프롬프트 앞쪽에 고정 (OpenAI 자동 캐싱 / Anthropic `cache_control`) |
 | SQL 안전성 | **sqlglot** — AST 파싱, 금지 노드 탐지, `LIMIT` 주입, 방언 정규화 |
 | 데이터 | **SQLite** 읽기 전용 커넥션 + 합성 데이터셋 |
 | UI | **Streamlit** (`chat_input`, `status`, `tabs`) + **Plotly Express** 자동 시각화 |
