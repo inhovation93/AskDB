@@ -13,7 +13,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from src import evaluation, knowledge, llm, pipeline
+from src import erd, evaluation, knowledge, llm, pipeline
 from src.db import get_connection, introspect, render_schema, run_query
 from src.knowledge import DATA_MAX_DATE, DATA_MIN_DATE
 
@@ -461,10 +461,41 @@ with tab_schema:
     k4.metric("예제 뱅크", f"{len(st.session_state['example_bank'])}개",
               delta=f"+{st.session_state['approved']} 승인" if st.session_state["approved"] else None)
 
-    view = st.radio("보기", ["테이블 상세", "모델에 주입되는 스키마 원문", "관계(FK) 목록"],
+    view = st.radio("보기", ["🗺️ ERD 관계도", "테이블 상세",
+                             "모델에 주입되는 스키마 원문", "관계(FK) 목록"],
                     horizontal=True, label_visibility="collapsed")
 
-    if view == "테이블 상세":
+    if view == "🗺️ ERD 관계도":
+        oc1, oc2, oc3 = st.columns([1.1, 1, 1.4])
+        detail = oc1.radio("컬럼 표시", ["키 컬럼만", "전체 컬럼"], horizontal=True,
+                           help="'키 컬럼만' 은 PK/FK 만 보여 관계 파악에 집중할 수 있습니다.")
+        direction = oc2.radio("배치 방향", ["좌→우", "위→아래"], horizontal=True)
+        last_tables = (st.session_state["history"][-1]["result"].linked_tables
+                       if st.session_state["history"] else [])
+        do_hl = oc3.checkbox(
+            f"직전 질문이 사용한 테이블 강조 ({len(last_tables)}개)",
+            value=bool(last_tables), disabled=not last_tables,
+            help="스키마 링킹이 어떤 테이블을 골랐는지 ERD 위에서 바로 확인합니다.")
+
+        st.graphviz_chart(
+            erd.build_dot(schema,
+                          highlight=set(last_tables) if do_hl else set(),
+                          keys_only=(detail == "키 컬럼만"),
+                          rankdir="LR" if direction == "좌→우" else "TB"),
+            width="stretch")
+
+        st.markdown(erd.LEGEND_HTML, unsafe_allow_html=True)
+        st.caption(
+            "**PK** 기본키 · **FK** 외래키 　|　 "
+            "선의 **까치발(⋔)** 쪽이 **N**, 반대쪽이 **1** (즉 `1 : N` 관계) 　|　 "
+            "**점선** 은 자기참조(`employees.manager_id` → 상사) 　|　 "
+            "그래프 우측 상단 확대 버튼으로 전체 화면으로 볼 수 있습니다.")
+
+        with st.expander("관계를 문장으로 읽기 (ERD 가 익숙하지 않을 때)"):
+            for sentence in erd.relation_sentences(schema):
+                st.markdown(f"- {sentence}")
+
+    elif view == "테이블 상세":
         for tname, table in schema.tables.items():
             with st.expander(f"**{tname}** — {table.comment}  ·  {table.row_count:,}행"):
                 st.dataframe(pd.DataFrame([{
@@ -628,6 +659,7 @@ AskDB 는 이 병목을 없애는 것을 목표로 한다. 단, 사내 DB 에 LL
 | 비용 최적화 | **프롬프트 캐싱** — 안정적인 규칙·세만틱 레이어를 프롬프트 앞쪽에 고정 배치 (OpenAI 자동 캐싱 / Anthropic `cache_control`) |
 | SQL 안전성 | **sqlglot** AST 파싱·검증·LIMIT 주입 |
 | 데이터 | **SQLite** 읽기 전용 커넥션, 9테이블 합성 데이터셋 |
+| ERD | **Graphviz DOT** — 스키마에서 자동 생성되어 문서가 코드와 어긋나지 않음 (브라우저 렌더링, 추가 설치물 없음) |
 | UI | **Streamlit** (chat, status, tabs) + **Plotly** 자동 시각화 |
 | 평가 | 자체 골든셋 + Execution Accuracy 채점기 |
 

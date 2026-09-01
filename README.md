@@ -89,6 +89,7 @@ scripts/
 src/
   sample_db.py          합성 샘플 DB 생성 (seed 고정, 9테이블 24,366행)
   db.py                 읽기전용 커넥션 · 스키마 인트로스펙션 · M-Schema 렌더링 · 실행
+  erd.py                ERD 자동 생성 (Graphviz DOT, 스키마에서 파생 → 항상 최신)
   schema_linker.py      ① 질문 → 관련 테이블 선별 (동의어·코멘트·값·FK 연결성)
   knowledge.py          ② 세만틱 레이어(지표 정의) + Few-shot 뱅크 + 유사도 검색
   prompts.py            ③ 프롬프트 조립 (캐시 프리픽스 분리)
@@ -138,6 +139,7 @@ src/
 | 비용 최적화 | **프롬프트 캐싱** — 규칙·세만틱 레이어를 프롬프트 앞쪽에 고정 (OpenAI 자동 캐싱 / Anthropic `cache_control`) |
 | SQL 안전성 | **sqlglot** — AST 파싱, 금지 노드 탐지, `LIMIT` 주입, 방언 정규화 |
 | 데이터 | **SQLite** 읽기 전용 커넥션 + 합성 데이터셋 |
+| ERD | **Graphviz DOT** 자동 생성 → `st.graphviz_chart` 가 브라우저에서 렌더링 (추가 설치물 없음) |
 | UI | **Streamlit** (`chat_input`, `status`, `tabs`) + **Plotly Express** 자동 시각화 |
 | 평가 | 자체 골든셋 + Execution Accuracy 채점기 (컬럼명·행순서 무시, 수치 반올림 비교) |
 
