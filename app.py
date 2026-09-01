@@ -13,7 +13,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from src import erd, evaluation, knowledge, llm, pipeline
+from src import erd, evaluation, knowledge, lineage, llm, pipeline
 from src.db import get_connection, introspect, render_schema, run_query
 from src.knowledge import DATA_MAX_DATE, DATA_MIN_DATE
 
@@ -288,6 +288,59 @@ def auto_chart(df: pd.DataFrame):
         return None
 
 
+ROLE_COLOR = {"출력": "#1d4ed8", "조건": "#b45309", "조인": "#0e7490",
+              "그룹": "#7c3aed", "정렬": "#be185d", "기타": "#64748b"}
+
+
+def render_lineage(lin: lineage.Lineage | None, index: int | str,
+                   title: str = "**📎 이 답의 근거 — 실제로 사용된 테이블 · 컬럼**") -> None:
+    """이 답이 어느 테이블·컬럼에서 나왔는지 근거를 보여준다."""
+    st.markdown(title)
+    if lin is None or lin.table_count == 0:
+        st.caption("SQL 에서 컬럼을 추출하지 못했습니다.")
+        return
+
+    chips = "".join(
+        f'<span style="background:#f1f5f9;border:1px solid #cbd5e1;border-radius:6px;'
+        f'padding:.2rem .55rem;margin:0 .3rem .3rem 0;display:inline-block;'
+        f'font-size:.8rem"><b>{table}</b> '
+        f'<span style="color:#64748b">{len(cols)}개 컬럼</span></span>'
+        for table, cols in sorted(lin.columns.items()))
+    st.markdown(f'<div style="margin:.15rem 0 .5rem">{chips}</div>',
+                unsafe_allow_html=True)
+
+    rows = lin.rows()
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch",
+                 height=min(330, 45 + 35 * len(rows)))
+
+    roles = "　".join(
+        f'<span style="color:{ROLE_COLOR[r]};font-weight:600">{r}</span>'
+        for r in ["출력", "조건", "조인", "그룹", "정렬"])
+    st.markdown(
+        f'<div style="font-size:.8rem;color:#64748b">사용된 곳 — {roles} '
+        f'(각각 SELECT · WHERE/HAVING · JOIN ON · GROUP BY · ORDER BY)</div>',
+        unsafe_allow_html=True)
+
+    notes = []
+    if lin.star_tables:
+        notes.append(f"`SELECT *` 로 전체 컬럼을 읽은 테이블: "
+                     f"{', '.join(sorted(lin.star_tables))}")
+    if lin.ctes:
+        notes.append(f"임시 결과셋(CTE): {', '.join(lin.ctes)}")
+    if lin.unresolved:
+        notes.append(f"소속 테이블이 모호해 제외한 컬럼: {', '.join(lin.unresolved)}")
+    if not lin.exact:
+        notes.append("일부 구문은 정밀 분석에 실패해 추정으로 표시했습니다.")
+    for note in notes:
+        st.caption(f"· {note}")
+
+    st.download_button(
+        "⬇️ 사용 컬럼 목록 CSV",
+        pd.DataFrame(rows).to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"askdb_columns_{index}.csv", mime="text/csv",
+        key=f"dl_lineage_{index}")
+
+
 def render_result(item: dict, index: int) -> None:
     """저장된 결과 1건을 렌더링한다."""
     res: pipeline.Result = item["result"]
@@ -318,10 +371,13 @@ def render_result(item: dict, index: int) -> None:
         st.markdown(item["answer"])
 
     df: pd.DataFrame = res.df
+    lin = res.lineage
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("반환 행 수", f"{res.row_count:,}")
     m2.metric("DB 실행시간", f"{res.exec_sec * 1000:.0f} ms")
-    m3.metric("참조 테이블", f"{len(res.linked_tables)}개")
+    m3.metric("사용 테이블 · 컬럼",
+              f"{lin.table_count} · {lin.column_count}" if lin else "—",
+              help="이 SQL 이 실제로 읽은 테이블 수와 컬럼 수입니다.")
     m4.metric("자기수정", f"{res.attempts - 1}회")
 
     left, right = st.columns([1.15, 1])
@@ -351,6 +407,8 @@ def render_result(item: dict, index: int) -> None:
     st.code(res.sql, language="sql")
     if res.assumption and res.assumption != "없음":
         st.caption(f"📌 해석 가정: {res.assumption}")
+
+    render_lineage(res.lineage, index)
 
     fb1, fb2, _ = st.columns([1, 1, 6])
     if fb1.button("👍 정확함", key=f"up_{index}",
@@ -390,6 +448,8 @@ with tab_ask:
                 if fig is not None:
                     cc2.plotly_chart(fig, width="stretch")
                 st.caption(f"{len(gdf):,}행 · {sec * 1000:.0f}ms · 읽기 전용 커넥션에서 실행")
+                render_lineage(lineage.analyze(pick.gold_sql, schema), "offline",
+                               title="**📎 이 SQL 이 사용한 테이블 · 컬럼**")
 
     st.divider()
 
@@ -470,8 +530,14 @@ with tab_schema:
         detail = oc1.radio("컬럼 표시", ["키 컬럼만", "전체 컬럼"], horizontal=True,
                            help="'키 컬럼만' 은 PK/FK 만 보여 관계 파악에 집중할 수 있습니다.")
         direction = oc2.radio("배치 방향", ["좌→우", "위→아래"], horizontal=True)
-        last_tables = (st.session_state["history"][-1]["result"].linked_tables
-                       if st.session_state["history"] else [])
+        # 강조 대상은 '실제로 SQL 이 읽은 테이블'을 우선한다.
+        # (링킹 후보는 프롬프트에 넣은 목록이라 실제 사용분보다 넓다)
+        last_tables: list[str] = []
+        if st.session_state["history"]:
+            last = st.session_state["history"][-1]["result"]
+            last_tables = (sorted(last.lineage.columns)
+                           if last.lineage and last.lineage.table_count
+                           else last.linked_tables)
         do_hl = oc3.checkbox(
             f"직전 질문이 사용한 테이블 강조 ({len(last_tables)}개)",
             value=bool(last_tables), disabled=not last_tables,
@@ -631,6 +697,7 @@ AskDB 는 이 병목을 없애는 것을 목표로 한다. 단, 사내 DB 에 LL
 | ④ 정적 검증·가드레일 | sqlglot 파싱 → 단일 SELECT 강제, DDL/DML 차단, 없는 테이블 차단, 민감 컬럼 차단, LIMIT 주입 | 실행 **전에** 위험과 환각을 걸러냄 |
 | ⑤ 읽기전용 실행 | `mode=ro` 커넥션 + 쿼리 타임아웃 | 드라이버 수준 2차 방어. 폭주 쿼리로 DB 를 물지 않게 함 |
 | ⑥ 자기수정 | 오류 메시지를 모델에 되먹여 재생성 (기본 2회) | 실무 질문의 상당수는 1회차에 사소한 컬럼·문법 오류가 남 |
+| ⑦ 사용 컬럼 분석 | 생성 SQL 을 AST 로 되짚어 실제로 읽은 테이블·컬럼과 그 용도를 추출 | 근거를 볼 수 없으면 답을 신뢰할 수 없음 |
 
 #### 정확도를 만드는 3가지 설계
 

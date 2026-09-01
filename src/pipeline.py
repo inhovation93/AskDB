@@ -19,7 +19,7 @@ from datetime import date
 
 import pandas as pd
 
-from . import guardrails, knowledge, llm, prompts, schema_linker
+from . import guardrails, knowledge, lineage, llm, prompts, schema_linker
 from .db import QueryTimeout, Schema, render_schema, run_query
 
 
@@ -62,6 +62,7 @@ class Result:
     examples: list = field(default_factory=list)
     row_count: int = 0
     exec_sec: float = 0.0
+    lineage: lineage.Lineage | None = None   # SQL 이 실제로 건드린 테이블·컬럼
 
 
 def run(question: str, *, client, schema: Schema, options: Options,
@@ -207,6 +208,18 @@ def run(question: str, *, client, schema: Schema, options: Options,
         res.steps.append(Step("⑤ 실행", "ok",
                               f"{len(df):,}행 반환 · {exec_sec * 1000:.0f}ms",
                               time.time() - t))
+
+        # ⑦ 계보 분석 — 이 답이 어느 컬럼에서 나왔는지 근거를 만든다
+        t = time.time()
+        lin = lineage.analyze(guard.sql, schema)
+        res.lineage = lin
+        res.steps.append(Step(
+            "⑦ 사용 컬럼 분석",
+            "ok" if lin.table_count else "warn",
+            f"테이블 {lin.table_count}개 · 컬럼 {lin.column_count}개 사용 — {lin.summary()}"
+            if lin.table_count else "SQL 에서 컬럼을 추출하지 못했습니다.",
+            time.time() - t))
+
         res.ok = True
         res.sql = guard.sql
         res.df = df
